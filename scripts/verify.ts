@@ -71,11 +71,6 @@ async function main() {
     return `${rows.length} apps, worst is ${worst.name} (${worst.critical}C/${worst.high}H)`;
   });
 
-  await check("getTeamExposure", async () => {
-    const rows = await queries.getTeamExposure();
-    return `${rows.length} teams`;
-  });
-
   await check("getRiskiestPackages", async () => {
     const rows = await queries.getRiskiestPackages(8);
     if (rows.length === 0) throw new Error("nothing vulnerable is reachable — the demo would look empty");

@@ -73,7 +73,9 @@ async function wipe(driver: Driver, database: string) {
        WITH n LIMIT $batch
        DETACH DELETE n
        RETURN count(*) AS deleted`,
-      { batch: 5_000 },
+      // neo4j.int() because `disableLosslessIntegers` makes plain JS numbers go
+      // out as Bolt floats, and LIMIT rejects a float.
+      { batch: neo4j.int(5_000) },
       { database },
     );
     const deleted = records[0]?.get("deleted") ?? 0;

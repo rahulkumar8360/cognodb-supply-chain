@@ -56,6 +56,32 @@ export function getDatabaseName(): string {
   return readDatabaseConfig().database;
 }
 
+/**
+ * Converts whole numbers in the parameter map into Bolt integers.
+ *
+ * `disableLosslessIntegers` is on so that counts come back as plain JS numbers,
+ * but that setting is about *reading*. On the way out, a JS number is encoded
+ * as a Bolt float — and `SKIP`/`LIMIT` reject a float outright
+ * ("'25.0' is not a valid value. Must be a non-negative integer"). Every
+ * paginated query in the app would fail without this.
+ *
+ * Only whole numbers are converted. A CVSS score of 7.5 is genuinely a float
+ * and stays one.
+ */
+function toBoltParameters(params: Record<string, unknown>): Record<string, unknown> {
+  const convert = (value: unknown): unknown => {
+    if (typeof value === "number") {
+      return Number.isInteger(value) ? neo4j.int(value) : value;
+    }
+    if (Array.isArray(value)) return value.map(convert);
+    return value;
+  };
+
+  const converted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) converted[key] = convert(value);
+  return converted;
+}
+
 export type QueryOptions = {
   /** READ routes to a follower where the topology has one; WRITE always hits the leader. */
   write?: boolean;
@@ -79,7 +105,7 @@ export async function runQuery<T extends RecordShape>(
   try {
     const { records } = await getDriver().executeQuery<{ records: Array<{ toObject(): T }> }>(
       cypher,
-      params,
+      toBoltParameters(params),
       {
         database: getDatabaseName(),
         routing: options.write ? routing.WRITE : routing.READ,

@@ -1,5 +1,6 @@
 import { runQuery, runQuerySingle } from "../neo4j";
 
+import type { ApplicationExposure } from "./overview";
 import type { AdvisorySummary, ApplicationSummary, Criticality, RouteStep } from "./types";
 
 export async function listApplications(): Promise<ApplicationSummary[]> {
@@ -64,10 +65,11 @@ export async function getApplicationDetail(id: string): Promise<ApplicationDetai
     runQuerySingle<{ installedPackages: number; declaredOnlyPackages: number }>(
       `MATCH (app:Application { id: $id })
        OPTIONAL MATCH (app)-[:DEPENDS_ON*1..5]->(installed:Package)
-       WITH app, collect(DISTINCT installed) AS installedPackages
+       WITH app, count(DISTINCT installed) AS installedCount
        OPTIONAL MATCH (app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(declared:Package)
-       RETURN size(installedPackages) AS installedPackages,
-              count(DISTINCT declared) - size(installedPackages) AS declaredOnlyPackages`,
+       WITH installedCount, count(DISTINCT declared) AS declaredCount
+       RETURN installedCount AS installedPackages,
+              declaredCount - installedCount AS declaredOnlyPackages`,
       { id },
     ),
     runQuery<ApplicationDirectDependency>(
@@ -125,21 +127,38 @@ export type TeamExposure = {
   low: number;
 };
 
-/** Exposure rolled up by owning team — the view an engineering manager wants. */
-export async function getTeamExposure(): Promise<TeamExposure[]> {
-  return runQuery<TeamExposure>(
-    `MATCH (app:Application)
-     OPTIONAL MATCH (app)-[:DEPENDS_ON*1..5]->(:Package)<-[:AFFECTS]-(adv:Advisory)
-     WITH app, collect(DISTINCT adv) AS advisories
-     WITH app.team AS team, collect(app) AS apps, collect(advisories) AS perApp
-     WITH team, size(apps) AS applications,
-          reduce(all = [], list IN perApp | all + list) AS advisories
-     RETURN team, applications,
-       size([a IN advisories WHERE a.severity = 'critical']) AS critical,
-       size([a IN advisories WHERE a.severity = 'high']) AS high,
-       size([a IN advisories WHERE a.severity = 'moderate']) AS moderate,
-       size([a IN advisories WHERE a.severity = 'low']) AS low
-     ORDER BY critical DESC, high DESC, team ASC`,
+/**
+ * Exposure rolled up by owning team — the view an engineering manager wants.
+ *
+ * Derived from `getApplicationExposure` rather than queried separately. As
+ * Cypher it was a second five-hop traversal over the whole graph to re-derive
+ * numbers the dashboard had already fetched, and it measured at 4.4 seconds on
+ * a free-tier instance. Grouping thirty rows in memory is free, and it also
+ * guarantees the two panels can never disagree — which they could if one query
+ * were changed and the other were not.
+ */
+export function rollUpByTeam(rows: ApplicationExposure[]): TeamExposure[] {
+  const teams = new Map<string, TeamExposure>();
+
+  for (const row of rows) {
+    const existing = teams.get(row.team) ?? {
+      team: row.team,
+      applications: 0,
+      critical: 0,
+      high: 0,
+      moderate: 0,
+      low: 0,
+    };
+    existing.applications += 1;
+    existing.critical += row.critical;
+    existing.high += row.high;
+    existing.moderate += row.moderate;
+    existing.low += row.low;
+    teams.set(row.team, existing);
+  }
+
+  return [...teams.values()].sort(
+    (a, b) => b.critical - a.critical || b.high - a.high || a.team.localeCompare(b.team),
   );
 }
 

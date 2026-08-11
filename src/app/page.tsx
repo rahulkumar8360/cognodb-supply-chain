@@ -24,8 +24,9 @@ import {
   getExposureSummary,
   getGraphTotals,
   getRiskiestPackages,
-  getTeamExposure,
+  rollUpByTeam,
 } from "@/lib/queries";
+import type { ApplicationExposure, TeamExposure } from "@/lib/queries";
 
 // Every page reads live from the database on each request. Caching a security
 // dashboard would mean showing a reviewer a stale answer to "am I exposed?",
@@ -53,19 +54,56 @@ export default function OverviewPage() {
       </Suspense>
 
       <div className="mt-6 grid gap-5 xl:grid-cols-[1.45fr_1fr]">
-        <Suspense fallback={<PanelSkeleton title="Exposure by application" columns={5} />}>
-          <ApplicationExposurePanel />
+        <Suspense
+          fallback={
+            <>
+              <PanelSkeleton title="Exposure by application" columns={5} />
+              <div className="xl:hidden">
+                <PanelSkeleton title="Exposure by team" rows={6} columns={2} />
+              </div>
+            </>
+          }
+        >
+          {/* Both panels come from one traversal — see rollUpByTeam. */}
+          <ExposurePanels />
         </Suspense>
         <div className="space-y-5">
           <Suspense fallback={<PanelSkeleton title="Fix these first" rows={6} columns={3} />}>
             <RiskiestPackagesPanel />
           </Suspense>
-          <Suspense fallback={<PanelSkeleton title="Exposure by team" rows={6} columns={2} />}>
-            <TeamExposurePanel />
-          </Suspense>
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * The application table and the team roll-up, from a single query.
+ *
+ * They are rendered by one component rather than two because they are two views
+ * of the same traversal. Splitting them into separate Suspense boundaries would
+ * look tidier in the markup and cost a second five-hop walk over the entire
+ * graph to produce numbers that must, by definition, agree.
+ */
+async function ExposurePanels() {
+  const result = await attempt(getApplicationExposure);
+
+  if (!result.ok) {
+    return (
+      <Panel>
+        <PanelHeader title="Exposure by application" />
+        <div className="p-4">
+          <RetryableError error={result.error} compact />
+        </div>
+      </Panel>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <ApplicationExposurePanel rows={result.data} />
+      <TeamExposurePanel rows={rollUpByTeam(result.data)} />
+    </div>
   );
 }
 
@@ -126,22 +164,7 @@ function StatRowSkeleton() {
 
 // ------------------------------------------------- exposure by application --
 
-async function ApplicationExposurePanel() {
-  const result = await attempt(getApplicationExposure);
-
-  if (!result.ok) {
-    return (
-      <Panel>
-        <PanelHeader title="Exposure by application" />
-        <div className="p-4">
-          <RetryableError error={result.error} compact />
-        </div>
-      </Panel>
-    );
-  }
-
-  const rows = result.data;
-
+function ApplicationExposurePanel({ rows }: { rows: ApplicationExposure[] }) {
   return (
     <Panel>
       <PanelHeader
@@ -268,21 +291,7 @@ async function RiskiestPackagesPanel() {
 
 // ------------------------------------------------------------ team roll-up --
 
-async function TeamExposurePanel() {
-  const result = await attempt(getTeamExposure);
-
-  if (!result.ok) {
-    return (
-      <Panel>
-        <PanelHeader title="Exposure by team" />
-        <div className="p-4">
-          <RetryableError error={result.error} compact />
-        </div>
-      </Panel>
-    );
-  }
-
-  const rows = result.data;
+function TeamExposurePanel({ rows }: { rows: TeamExposure[] }) {
   const max = Math.max(1, ...rows.map((row) => row.critical + row.high + row.moderate + row.low));
 
   return (

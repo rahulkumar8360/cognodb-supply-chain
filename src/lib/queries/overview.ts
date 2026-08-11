@@ -96,11 +96,12 @@ export async function getApplicationExposure(): Promise<ApplicationExposure[]> {
   return runQuery<ApplicationExposure>(
     `MATCH (app:Application)
      OPTIONAL MATCH (app)-[:DEPENDS_ON*1..5]->(installed:Package)
-     WITH app, collect(DISTINCT installed) AS installedPackages
+     OPTIONAL MATCH (installed)<-[:AFFECTS]-(adv:Advisory)
+     WITH app,
+          count(DISTINCT installed) AS installedCount,
+          collect(DISTINCT adv) AS advisories
      OPTIONAL MATCH (app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(declared:Package)
-     WITH app, installedPackages, count(DISTINCT declared) AS declaredCount
-     OPTIONAL MATCH (app)-[:DEPENDS_ON*1..5]->(:Package)<-[:AFFECTS]-(adv:Advisory)
-     WITH app, installedPackages, declaredCount, collect(DISTINCT adv) AS advisories
+     WITH app, installedCount, advisories, count(DISTINCT declared) AS declaredCount
      RETURN
        app.id AS id,
        app.name AS name,
@@ -108,8 +109,8 @@ export async function getApplicationExposure(): Promise<ApplicationExposure[]> {
        app.criticality AS criticality,
        app.environment AS environment,
        app.description AS description,
-       size(installedPackages) AS installedPackages,
-       declaredCount - size(installedPackages) AS declaredOnlyPackages,
+       installedCount AS installedPackages,
+       declaredCount - installedCount AS declaredOnlyPackages,
        size(advisories) AS advisories,
        size([a IN advisories WHERE a.severity = 'critical']) AS critical,
        size([a IN advisories WHERE a.severity = 'high']) AS high,

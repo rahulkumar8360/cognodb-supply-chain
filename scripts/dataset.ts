@@ -574,6 +574,32 @@ export function buildDataset(): Dataset {
   // frameworks and mid-level libraries rather than on `is-number` directly.
   const appCandidatePool = packages.filter((pkg) => pkg.layer >= 3);
 
+  // Applications draw their extra dependencies from a couple of clusters rather
+  // than from the whole registry.
+  //
+  // Without this every service picks from the same hub-weighted pool, their
+  // trees overlap almost entirely, and every row on the dashboard shows the
+  // same numbers — a report that ranks thirty services identically is not a
+  // report. Real organisations cluster the same way: the front ends share a
+  // build-tooling world, the back ends share a server world, and the data
+  // services share a third. The shared core is still shared; what differs is
+  // the tail each service drags in behind it.
+  const CLUSTER_COUNT = 6;
+  const clusterOf = new Map<string, number>();
+  for (const pkg of appCandidatePool) {
+    let hash = 0;
+    for (let i = 0; i < pkg.name.length; i += 1) hash = (hash * 31 + pkg.name.charCodeAt(i)) >>> 0;
+    clusterOf.set(pkg.name, hash % CLUSTER_COUNT);
+  }
+  // Teams sit in the same part of the graph as each other, which is what makes
+  // the team roll-up on the dashboard say something.
+  const teamClusters = new Map<string, [number, number]>();
+  for (const spec of APPLICATIONS) {
+    if (teamClusters.has(spec.team)) continue;
+    const primary = teamClusters.size % CLUSTER_COUNT;
+    teamClusters.set(spec.team, [primary, (primary + 1 + randomInt(0, 2)) % CLUSTER_COUNT]);
+  }
+
   for (const spec of APPLICATIONS) {
     applications.push({
       id: spec.id,
@@ -594,8 +620,18 @@ export function buildDataset(): Dataset {
       });
     }
 
-    for (let i = 0; i < spec.extraDeps && appCandidatePool.length > 0; i += 1) {
-      const candidate = pickWeighted(appCandidatePool, attachmentWeight);
+    const [primaryCluster, secondaryCluster] = teamClusters.get(spec.team)!;
+    const inCluster = appCandidatePool.filter((pkg) => {
+      const cluster = clusterOf.get(pkg.name);
+      return cluster === primaryCluster || cluster === secondaryCluster;
+    });
+    const drawPool = inCluster.length >= spec.extraDeps ? inCluster : appCandidatePool;
+
+    for (let i = 0; i < spec.extraDeps && drawPool.length > 0; i += 1) {
+      // A tenth of the time, reach outside the cluster — no real service's
+      // dependency list is perfectly tidy, and the overlap it creates is what
+      // makes the shared-chokepoint reports interesting.
+      const candidate = pickWeighted(chance(0.1) ? appCandidatePool : drawPool, attachmentWeight);
       if (chosen.has(candidate.name)) continue;
       chosen.add(candidate.name);
       applicationDependencies.push({
@@ -770,10 +806,15 @@ export function buildDataset(): Dataset {
   const simulationPool = packages.filter((pkg) => !advisedPackages.has(pkg.name) && pkg.layer <= 4);
 
   for (let i = 0; i < SIMULATED_ADVISORY_COUNT && simulationPool.length > 0; i += 1) {
-    // Biased towards packages plenty of things depend on, so the advisory feed
-    // is dominated by findings that actually reach an application — which is
-    // what a real feed filtered to your own SBOM looks like.
-    const target = pickWeighted(simulationPool, attachmentWeight);
+    // Biased towards packages plenty of things depend on — so most findings
+    // reach something, which is what a real feed filtered to your own SBOM
+    // looks like — but far more weakly than dependency attachment is. Reusing
+    // the full attachment weight here would land almost every advisory on a
+    // shared core hub, and then every application would show an identical
+    // count and the per-service ranking would mean nothing.
+    const target = pickWeighted(simulationPool, (pkg) =>
+      1 + Math.pow(inDegree.get(pkg.name) ?? 0, 0.35),
+    );
     if (advisedPackages.has(target.name)) continue;
     advisedPackages.add(target.name);
 

@@ -103,7 +103,11 @@ export function DatabaseErrorState({ error, onRetry, compact = false }: Props) {
           <h2 className={cx("font-semibold text-ink", compact ? "text-sm" : "text-base")}>{copy.title}</h2>
           <p className="mt-1 text-[13px] leading-relaxed text-ink-muted">{copy.body}</p>
 
-          {copy.steps ? (
+          {/* The troubleshooting steps are the same on every panel, and when a
+              whole page fails, three copies of the same checklist is noise.
+              Compact panels show the headline and a retry; the full-size state
+              — one per page — carries the instructions. */}
+          {copy.steps && !compact ? (
             <ul className="mt-3 space-y-1.5">
               {copy.steps.map((step) => (
                 <li key={step} className="flex gap-2 text-[13px] leading-relaxed text-ink-muted">
