@@ -1,26 +1,160 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/**
+ * Design tokens.
+ *
+ * The palette is deliberately narrow: a near-black canvas, three surface
+ * elevations, two text weights, and a single cyan accent. Everything else is
+ * severity colour, and severity colour is the only saturated thing on the page
+ * — so when something is red, it is red because it matters, not because it is
+ * decorative. A security dashboard that uses colour for ornament has nothing
+ * left to say when there is an actual critical finding.
+ */
+@theme {
+  --color-canvas: #08090c;
+  --color-surface: #0e1015;
+  --color-surface-raised: #14171e;
+  --color-surface-hover: #1a1e27;
+  --color-line: #1e232d;
+  --color-line-strong: #2a303c;
+
+  --color-ink: #e8eaee;
+  --color-ink-muted: #9099a8;
+  --color-ink-faint: #626b7a;
+
+  --color-accent: #38bdf8;
+  --color-accent-dim: #0ea5e9;
+  --color-accent-wash: #0c2a3a;
+
+  --color-critical: #fb5c7d;
+  --color-critical-wash: #3a1220;
+  --color-high: #fb923c;
+  --color-high-wash: #3a2113;
+  --color-moderate: #fbbf24;
+  --color-moderate-wash: #33270c;
+  --color-low: #60a5fa;
+  --color-low-wash: #17253f;
+  --color-safe: #34d399;
+  --color-safe-wash: #0d2e24;
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-mono-stack), ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* A single light-mode override set. The app is dark-first because it is an
+   operations tool, but a reviewer opening it on a light-themed machine should
+   not get an unreadable page. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --color-canvas: #f7f8fa;
+    --color-surface: #ffffff;
+    --color-surface-raised: #ffffff;
+    --color-surface-hover: #f1f3f7;
+    --color-line: #e3e6ec;
+    --color-line-strong: #cdd3dd;
+    --color-ink: #12151b;
+    --color-ink-muted: #5b6472;
+    --color-ink-faint: #838d9c;
+    --color-accent: #0284c7;
+    --color-accent-dim: #0369a1;
+    --color-accent-wash: #e0f2fe;
+    --color-critical: #cf1244;
+    --color-critical-wash: #ffe4ec;
+    --color-high: #c2410c;
+    --color-high-wash: #ffedd5;
+    --color-moderate: #a16207;
+    --color-moderate-wash: #fef3c7;
+    --color-low: #1d4ed8;
+    --color-low-wash: #dbeafe;
+    --color-safe: #047857;
+    --color-safe-wash: #d1fae5;
   }
 }
 
+html {
+  color-scheme: dark light;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Tabular figures everywhere a number sits in a column, so digits line up and
+   a changing count does not make the row twitch. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
+}
+
+/* Focus rings are a single consistent treatment rather than the browser
+   default, which is invisible on this background. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Scrollbars inside panels. Left alone on the page itself. */
+.scroll-panel {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+.scroll-panel::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.scroll-panel::-webkit-scrollbar-thumb {
+  background-color: var(--color-line-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.scroll-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Skeletons sweep rather than pulse: a sweep reads as "work in progress",
+   a pulse reads as "something is wrong". */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--color-surface-raised);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--color-ink) 6%, transparent),
+    transparent
+  );
+  animation: shimmer 1.6s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

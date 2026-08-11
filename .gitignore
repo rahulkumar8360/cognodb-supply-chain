@@ -30,8 +30,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files — real credentials must never be committed.
+# .env.example is the exception: it documents the shape with empty values.
 .env*
+!.env.example
 
 # vercel
 .vercel
