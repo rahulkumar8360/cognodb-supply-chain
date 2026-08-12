@@ -5,7 +5,7 @@
 A working web application that answers open-source supply-chain questions as graph traversals over
 [CognoDB](https://console.cognodb.com). Built for the Wexa AI take-home assignment.
 
-- **Live demo:** _(deployed link — see [Deploying](#deploying))_
+- **Live demo:** **https://cognodb-supply-chain.vercel.app**
 - **Stack:** Next.js 15 (App Router) · TypeScript · Tailwind CSS v4 · `neo4j-driver` over Bolt · CognoDB
 
 ---
@@ -438,19 +438,33 @@ why the numbers in this README match what you will see.
 
 ## Deploying
 
+Deployed at **https://cognodb-supply-chain.vercel.app**.
+
 The app is a standard Next.js application with no build-time database access, so any Node host works.
+Nothing is prerendered — every page is `force-dynamic`, because a security dashboard that serves a cached
+answer to "am I exposed?" is worse than one that is slow.
+
+Import the repository at [vercel.com/new](https://vercel.com/new), then add the four environment variables
+from `.env.example` before the first deploy (Vercel's "Import .env" button accepts `.env.local` directly).
+Or from the CLI:
 
 ```bash
 npm i -g vercel
-vercel                             # link the project
-vercel env add COGNODB_URI
-vercel env add COGNODB_PASSWORD
-vercel env add COGNODB_USERNAME    # cognodb
+vercel link
+vercel env add COGNODB_URI production
+vercel env add COGNODB_PASSWORD production
+vercel env add COGNODB_USERNAME production    # cognodb
+vercel env add COGNODB_DATABASE production    # neo4j
 vercel --prod
 ```
 
 The CognoDB instance must be running and seeded for the deployment to show anything; if it is not, the app
-renders its "unreachable" state rather than crashing.
+renders its "unreachable" state rather than crashing — which you can see for yourself by pausing the
+instance from the console and reloading.
+
+One deployment-specific note: each warm serverless instance holds its own Bolt connection pool, and they
+all share the free tier's 200-connection cap, so the pool is capped at 8 with a five-minute connection
+lifetime.
 
 ## Screenshots
 
