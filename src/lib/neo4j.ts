@@ -39,7 +39,15 @@ function createDriver(): Driver {
     // show its "unreachable" state instead of hanging.
     connectionAcquisitionTimeout: 15_000,
     connectionTimeout: 10_000,
-    maxConnectionPoolSize: 20,
+    // Deliberately small. In a serverless deployment every warm function
+    // instance holds its own pool, and they all share the free tier's cap of
+    // 200 connections — a pool of 20 means ten concurrent instances exhaust it
+    // and the eleventh sees a connection error rather than a slow page. Eight
+    // is plenty for the handful of parallel queries any single page issues.
+    maxConnectionPoolSize: 8,
+    // Idle sockets are closed rather than held open forever, so instances that
+    // go quiet hand their connections back.
+    maxConnectionLifetime: 5 * 60_000,
     maxTransactionRetryTime: 8_000,
     userAgent: "cognodb-supply-chain/1.0",
   });
