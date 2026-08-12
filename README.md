@@ -317,6 +317,24 @@ A c0 instance is 0.5 burstable vCPU and 256 MB. Three things keep the pages fast
 
 `npm run verify` prints per-query timings and flags anything over three seconds.
 
+### This app's own dependencies
+
+It would be strange to write a supply-chain risk tool and not run the tool's own audit, so: at the time
+of writing `npm audit` reports **3 high-severity advisories**, all of them transitive dependencies of
+Next.js itself — `postcss` (source-map path traversal) and `sharp` (inherited libvips CVEs). Nothing here
+depends on either directly.
+
+The only fix `npm audit fix` offers is `--force`, which upgrades Next 15 → 16, a major version. I chose
+not to take a breaking framework upgrade late in a time-boxed build, and the reasoning is exactly the
+judgement this app is built to support: neither package is reachable from a request path at runtime.
+`postcss` runs at build time, and `sharp` is only used by `next/image`'s optimiser, which this app never
+invokes — it ships no raster images at all. Reachability is what decides whether an advisory is urgent,
+which is the whole argument of the [Why a graph database?](#why-a-graph-database) section.
+
+On a real production service I would take the upgrade on a branch, run the suite, and ship it in its own
+change. Flagging it here rather than staying quiet, because "we knew and here's why we waited" and "we
+never looked" are very different answers.
+
 ### Interface decisions
 
 - **Filters live in the URL.** A filtered view is a link that can be pasted into an incident channel, and
