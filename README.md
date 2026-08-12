@@ -25,7 +25,7 @@ about *connections* rather than records:
 
 Supply Chain Atlas answers all three against a simulated but realistically-shaped snapshot of one
 company's dependency surface — 30 services at a fictional logistics company, Meridian, sitting on 1,608
-packages, 808 maintainers and 167 published advisories.
+packages, 808 maintainers and 169 published advisories.
 
 ## Why a graph database?
 
@@ -97,7 +97,7 @@ graph LR
   App ==>|"REACHES <i>(derived)</i><br/><i>installed · hops</i>"| Pkg
 ```
 
-**2,625 nodes · 21,327 relationships** — of which 7,192 are dependency edges and 9,201 are the derived
+**2,627 nodes · 21,329 relationships** — of which 7,192 are dependency edges and 9,201 are the derived
 `REACHES` closure described [below](#the-derived-reaches-closure).
 
 | Label | Count | What it is |
@@ -105,7 +105,7 @@ graph LR
 | `:Application` | 30 | A service Meridian runs. Tier-1 means revenue-critical. |
 | `:Package` | 1,608 | An npm package **that at least one service actually pulls in**. Not a registry mirror. |
 | `:Maintainer` | 808 | An account that can publish a new version of a package. |
-| `:Advisory` | 167 | A published vulnerability. |
+| `:Advisory` | 169 | A published vulnerability. |
 | `:License` | 12 | An SPDX licence, categorised by how much obligation it carries. |
 
 ### Two modelling decisions worth defending
@@ -417,8 +417,13 @@ vulnerability database, and nothing here should be used to decide whether a real
 - **~1,440 long-tail packages are generated**, layered underneath with sub-linear preferential attachment
   so that dependent counts and download figures follow the power law the real registry does.
 - **26 advisories are modelled on real published GHSA/CVE records** (`CVE-2021-44906` against `minimist`,
-  and so on). The other 127 are simulated, clearly marked with a `GHSA-SIM-` prefix and a "simulated" badge
-  in the UI.
+  and so on). The other 143 are simulated, clearly marked with a `GHSA-SIM-` prefix and a "simulated" badge
+  in the UI. Their weakness class is **inferred from the package's own name** rather than picked at random
+  — a glob matcher gets a path-traversal finding, a buffer utility gets an allocation bug, and only
+  genuinely shell-adjacent packages get command injection. Assigning them randomly produced a
+  command-injection CVE against `bytes`, a byte-size formatter that never touches a shell, and three
+  identical summaries in a row at the top of the feed. Everything else in this dataset works to be
+  plausible; that was the one page where it visibly wasn't.
 - **Maintainers, applications and the company are entirely fictional.**
 
 Two properties of the generator are deliberate rather than incidental, and the app would be dishonest

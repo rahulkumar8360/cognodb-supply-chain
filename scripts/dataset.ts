@@ -378,61 +378,155 @@ const APPLICATIONS: ApplicationSpec[] = [
 
 // ------------------------------------------------- synthetic advisory text --
 
-const SIM_WEAKNESSES: Array<{ cwe: string; summaries: string[]; severities: Severity[] }> = [
-  {
-    cwe: "CWE-1333 Inefficient Regular Expression",
-    severities: ["moderate", "moderate", "high"],
+/**
+ * Simulated advisories are matched to what the package plausibly does.
+ *
+ * The weakness class is inferred from the package's own name rather than picked
+ * at random, because a random pick produces nonsense: a command-injection CVE
+ * against `bytes`, a byte-size formatter that never touches a shell. On the
+ * advisories page — sorted by CVSS, so the criticals cluster at the top — three
+ * such rows in a row are the one place this dataset visibly stops being
+ * plausible, and plausibility is the whole reason the rest of it is built the
+ * way it is.
+ *
+ * Rules are ordered and the first match wins, so the narrow classes are listed
+ * before the broad ones.
+ */
+type Weakness = { cwe: string; severities: Severity[]; summaries: string[] };
+
+const WEAKNESSES: Record<string, Weakness> = {
+  commandInjection: {
+    cwe: "CWE-78 Command Injection",
+    severities: ["critical", "high"],
     summaries: [
-      "Catastrophic backtracking in the input-matching expression allows denial of service.",
-      "A crafted input string causes exponential matching time in the parser.",
+      "Arguments are interpolated into a shell command without quoting, allowing command injection.",
+      "A crafted executable name escapes argument quoting on Windows and runs an arbitrary command.",
+      "The lookup path is passed to the shell unescaped, so a crafted entry executes.",
     ],
   },
-  {
-    cwe: "CWE-1321 Prototype Pollution",
-    severities: ["high", "high", "critical"],
-    summaries: [
-      "A crafted key path allows an attacker to add properties to Object.prototype.",
-      "Deep-merge does not guard against __proto__, allowing prototype pollution.",
-    ],
-  },
-  {
+  pathTraversal: {
     cwe: "CWE-22 Path Traversal",
     severities: ["high", "critical"],
     summaries: [
-      "Insufficient normalisation allows reads outside the intended directory.",
-      "A crafted archive entry can be written outside the extraction root.",
+      "Insufficient normalisation allows reads outside the intended root directory.",
+      "A crafted archive entry can be written outside the extraction directory.",
+      "Encoded traversal sequences survive normalisation and escape the base path.",
+      "A symbolic link in the walked tree is followed outside the permitted root.",
     ],
   },
-  {
+  xss: {
     cwe: "CWE-79 Cross-site Scripting",
-    severities: ["moderate", "high"],
+    severities: ["moderate", "high", "high", "critical"],
     summaries: [
       "Output is not escaped before being inserted into the document.",
       "The sanitiser misses an attribute-context escape, allowing script injection.",
+      "A crafted style declaration survives sanitisation and executes on render.",
+      "Interpolated values are inserted unescaped when the template is compiled.",
     ],
   },
-  {
-    cwe: "CWE-400 Uncontrolled Resource Consumption",
-    severities: ["moderate", "high"],
+  prototypePollution: {
+    cwe: "CWE-1321 Prototype Pollution",
+    severities: ["high", "high", "high", "critical"],
     summaries: [
-      "An unbounded buffer grows without limit while parsing untrusted input.",
-      "Deeply nested input causes stack exhaustion and crashes the process.",
+      "A crafted key path allows an attacker to add properties to Object.prototype.",
+      "Deep merge does not guard against __proto__, allowing prototype pollution.",
+      "Parsing a document containing a __proto__ key pollutes the prototype chain.",
+      "Options are merged recursively without a own-property check, polluting Object.prototype.",
+      "Setting a nested key by dotted path walks into the prototype instead of the object.",
     ],
   },
-  {
-    cwe: "CWE-78 Command Injection",
-    severities: ["critical"],
-    summaries: ["Arguments are passed to a shell without quoting, allowing command injection."],
+  redos: {
+    cwe: "CWE-1333 Inefficient Regular Expression",
+    severities: ["moderate", "moderate", "high"],
+    summaries: [
+      "Catastrophic backtracking in the matching expression allows denial of service.",
+      "A crafted input string causes exponential matching time.",
+      "Nested quantifiers make pathological input hang the process.",
+      "A long run of repeated separators triggers quadratic matching behaviour.",
+      "The trailing-whitespace expression backtracks exponentially on crafted input.",
+      "Input containing many repeated delimiters degrades to quadratic time.",
+    ],
   },
-  {
+  resourceExhaustion: {
+    cwe: "CWE-400 Uncontrolled Resource Consumption",
+    severities: ["moderate", "high", "high", "critical"],
+    summaries: [
+      "An unbounded buffer grows without limit while reading untrusted input.",
+      "Deeply nested input causes stack exhaustion and crashes the process.",
+      "A frame with an oversized declared length is allocated before it is validated.",
+      "Entries are queued without backpressure, so a fast producer exhausts memory.",
+      "A crafted expansion produces an unbounded number of results.",
+      "Repeated calls retain references that are never released, leaking memory.",
+    ],
+  },
+  informationExposure: {
     cwe: "CWE-200 Information Exposure",
     severities: ["moderate", "low"],
     summaries: [
       "Credentials are written to the debug log in plain text.",
-      "Error responses leak absolute filesystem paths.",
+      "Error responses include absolute filesystem paths.",
+      "Authorization headers are preserved across a cross-origin redirect.",
+      "The cookie is returned to hosts outside the issuing domain.",
     ],
   },
+  inputValidation: {
+    cwe: "CWE-20 Improper Input Validation",
+    severities: ["moderate", "high"],
+    summaries: [
+      "Malformed percent-encoded input throws an unhandled exception, taking down the caller.",
+      "An out-of-range value is accepted and silently truncated.",
+      "Mixed-case scheme handling lets a crafted value bypass the allow-list.",
+    ],
+  },
+};
+
+/** Ordered, first match wins. Narrow classes first so `shell-quote` never lands in the generic bucket. */
+/**
+ * Short tokens must match a whole hyphen-separated segment, never a substring.
+ * `ini` matching inside "finished", "minify" and "mini-buffer" is what put
+ * prototype-pollution advisories on an HTTP callback helper and a minifier.
+ */
+const seg = (...tokens: string[]) => new RegExp(`(^|-)(${tokens.join("|")})(-|$)`);
+
+const WEAKNESS_RULES: Array<[RegExp, keyof typeof WEAKNESSES]> = [
+  [seg("shell", "spawn", "exec", "which", "cmd", "proc"), "commandInjection"],
+  [/command/, "commandInjection"],
+  [seg("fs", "dir", "tar", "zip"), "pathTraversal"],
+  [/path|glob|walker|resolver|serve|static|send|archive|realpath/, "pathTraversal"],
+  [seg("css", "dom"), "xss"],
+  [/html|template|sanitiz|escape|markdown|render|banner|color|chalk|style|spinner|progress/, "xss"],
+  [seg("ini", "env", "set", "map"), "prototypePollution"],
+  [/merge|clone|assign|extend|config|argv|flag|yaml|toml|json|deep|defaults|option|proto|prop/, "prototypePollution"],
+  [/regex|ansi|parse|token|match|lex|slug|wrap|trim|semver|valid|expand|brace|range|format|diff|patch/, "redos"],
+  [seg("ws", "raw", "body"), "resourceExhaustion"],
+  [/stream|buffer|queue|pool|cache|decode|encode|zlib|socket|bytes|chunk|minify|bundle|throttle|debounce|retry|backoff|schedul|lock|mutex|emitter|signal|watch/, "resourceExhaustion"],
+  [/log|debug|trace|error|cookie|token|auth|fetch|request|http|redirect|proxy|forward/, "informationExposure"],
+  [/uri|url|number|date|time|unit|money|codec|convert|uuid|hash|csv|xml|sourcemap/, "inputValidation"],
 ];
+
+/**
+ * Classes that are plausible for a utility whose name says nothing useful.
+ *
+ * Prototype pollution is deliberately *not* in here. It is the only broad class
+ * carrying critical severity, so leaving it as a fallback made every top-of-list
+ * critical a prototype-pollution finding — a page of identical CWEs, which is
+ * its own kind of implausible. It now only applies where the name actually
+ * suggests object or configuration manipulation.
+ */
+const GENERIC_WEAKNESSES: Array<keyof typeof WEAKNESSES> = [
+  "redos",
+  "resourceExhaustion",
+  "inputValidation",
+];
+
+function weaknessFor(packageName: string, fallbackIndex: number): Weakness {
+  // Scoped names carry no signal in the scope, so match on the part after the slash.
+  const name = packageName.replace(/^@[^/]+\//, "").toLowerCase();
+  for (const [pattern, key] of WEAKNESS_RULES) {
+    if (pattern.test(name)) return WEAKNESSES[key];
+  }
+  return WEAKNESSES[GENERIC_WEAKNESSES[fallbackIndex % GENERIC_WEAKNESSES.length]];
+}
 
 const CVSS_BY_SEVERITY: Record<Severity, [number, number]> = {
   critical: [9.0, 10.0],
@@ -836,6 +930,12 @@ export function buildDataset(): Dataset {
     });
   }
 
+  // One cursor per weakness class, so consecutive advisories *of the same
+  // class* always draw different text. Rotating on the global advisory index
+  // instead looks fine until the feed is sorted by CVSS, at which point the
+  // same sentence appears four times in the visible top of the list.
+  const summaryCursor = new Map<string, number>();
+
   const advisedPackages = new Set(affects.map((a) => a.packageName));
   const simulationPool = packages.filter((pkg) => !advisedPackages.has(pkg.name) && pkg.layer <= 4);
 
@@ -852,7 +952,13 @@ export function buildDataset(): Dataset {
     if (advisedPackages.has(target.name)) continue;
     advisedPackages.add(target.name);
 
-    const weakness = pick(SIM_WEAKNESSES);
+    // The weakness fits the package; the summary rotates through that class's
+    // variants by index, so two advisories of the same class never land next to
+    // each other with identical text.
+    const weakness = weaknessFor(target.name, i);
+    const cursor = summaryCursor.get(weakness.cwe) ?? 0;
+    summaryCursor.set(weakness.cwe, cursor + 1);
+    const summary = weakness.summaries[cursor % weakness.summaries.length];
     const severity = pick(weakness.severities);
     const [minCvss, maxCvss] = CVSS_BY_SEVERITY[severity];
     const id = `GHSA-SIM-${String(i + 1).padStart(4, "0")}`;
@@ -864,7 +970,7 @@ export function buildDataset(): Dataset {
       severity,
       cvss: Math.round((minCvss + random() * (maxCvss - minCvss)) * 10) / 10,
       cwe: weakness.cwe,
-      summary: pick(weakness.summaries),
+      summary,
       publishedAt: dateDaysAgo(randomInt(10, 1500)),
       simulated: true,
     });
