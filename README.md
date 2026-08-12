@@ -24,8 +24,8 @@ about *connections* rather than records:
    run code on your servers. Which strangers, and how many services would they reach?
 
 Supply Chain Atlas answers all three against a simulated but realistically-shaped snapshot of one
-company's dependency surface — 30 services at a fictional logistics company, Meridian, sitting on 1,612
-packages, 838 maintainers and 153 published advisories.
+company's dependency surface — 30 services at a fictional logistics company, Meridian, sitting on 1,608
+packages, 808 maintainers and 167 published advisories.
 
 ## Why a graph database?
 
@@ -94,16 +94,18 @@ graph LR
   Mnt -->|"MAINTAINS<br/><i>role · since</i>"| Pkg
   Adv -->|"AFFECTS<br/><i>vulnerableRange · patchedIn</i>"| Pkg
   Pkg -->|"LICENSED_UNDER"| Lic
+  App ==>|"REACHES <i>(derived)</i><br/><i>installed · hops</i>"| Pkg
 ```
 
-**2,645 nodes · 12,079 relationships**
+**2,625 nodes · 21,327 relationships** — of which 7,192 are dependency edges and 9,201 are the derived
+`REACHES` closure described [below](#the-derived-reaches-closure).
 
 | Label | Count | What it is |
 |---|---:|---|
 | `:Application` | 30 | A service Meridian runs. Tier-1 means revenue-critical. |
-| `:Package` | 1,612 | An npm package **that at least one service actually pulls in**. Not a registry mirror. |
-| `:Maintainer` | 838 | An account that can publish a new version of a package. |
-| `:Advisory` | 153 | A published vulnerability. |
+| `:Package` | 1,608 | An npm package **that at least one service actually pulls in**. Not a registry mirror. |
+| `:Maintainer` | 808 | An account that can publish a new version of a package. |
+| `:Advisory` | 167 | A published vulnerability. |
 | `:License` | 12 | An SPDX licence, categorised by how much obligation it carries. |
 
 ### Two modelling decisions worth defending
@@ -122,6 +124,33 @@ worth displaying.
 
 `DEPENDS_ON` is acyclic by construction: the generator assigns every package a layer and only ever draws
 edges to a strictly lower one, so variable-length traversals always terminate.
+
+### The derived `REACHES` closure
+
+`REACHES` is not part of the domain model. It is a materialised transitive closure — one edge per
+(application, package) pair that the application can reach — carrying `installed`, `hops` and
+`declaredHops`. The dependency edges remain the source of truth; `REACHES` is rebuilt from scratch by the
+loader every time the data is seeded.
+
+**Why it exists.** Measured against this graph on a free (c0) CognoDB instance, a single
+`(app)-[:DEPENDS_ON*1..5]->(pkg)` walk from all thirty applications costs **~4.3 s**. The dashboard needs
+three of them. Two report queries exceeded the transaction timeout entirely. The identical queries against
+the identical graph in Neo4j 5.26 run in **136 ms**, so the cost is the engine's expansion strategy — it
+does not appear to prune variable-length expansions to distinct endpoints the way Neo4j does — rather than
+the model or the data volume.
+
+**The split.** Aggregates and counts read `REACHES`. Anything that shows a *route* — blast radius, path
+tracing, the neighbourhood graph — still traverses `DEPENDS_ON` live, because a route cannot be
+precomputed into a single edge, and those queries are scoped to one package so they stay affordable.
+
+**Keeping it honest.** Derived data drifts, so `npm run verify` includes a cross-check: for a sample of
+packages it compares the application count recorded in `REACHES` against the count obtained by actually
+walking `DEPENDS_ON`, and fails if they disagree. Reachability only changes when someone merges a
+dependency change, which is exactly the profile of a thing worth precomputing.
+
+I would rather ship this trade-off and describe it than ship a fourteen-second dashboard, but it is a
+trade-off and not a free win: the closure costs 9,201 relationships and 40 seconds of load time, and it is
+stale the moment the underlying edges change without a reseed.
 
 ## The queries
 
@@ -302,20 +331,51 @@ Worth trying: stop the instance from the CognoDB console, or corrupt `COGNODB_PA
 
 ### Performance on the free tier
 
-A c0 instance is 0.5 burstable vCPU and 256 MB. Three things keep the pages fast:
+A c0 instance is 0.5 burstable vCPU and 256 MB, and roughly 900 ms of every timing below is network
+round-trip to the instance region — a trivial `count(*)` does not come back faster than that. Four things
+keep the pages usable:
 
-1. **Relationship types instead of path predicates.** `all(r IN relationships(path) WHERE …)` forces the
-   path to be bound, which costs the planner its pruning expansion — a five-hop traversal then enumerates
-   hundreds of thousands of *paths* instead of visiting each node once. Encoding scope in the type keeps
-   the common traversals prunable.
-2. **Traverse once, then join.** The chokepoint report expands out from the 30 applications a single time
-   to get every package's reach, then filters by maintainer count. Written the other way round — find
-   single-maintainer packages first, then traverse from each — it would run one traversal per package.
-3. **Several small queries rather than one wide one.** The package page fans out to dependencies,
+1. **The materialised closure.** Described [above](#the-derived-reaches-closure). This is by far the
+   largest single win: it took the dashboard from 14.3 s to 1.8 s and rescued two reports that were
+   timing out completely.
+2. **Traverse once, then join.** The chokepoint report reads every package's reach in one pass and then
+   filters by maintainer count. Written the other way round — find single-maintainer packages first, then
+   traverse from each — it would run one traversal per package.
+3. **Never compute a route that will be discarded.** Blast radius and application findings split into two
+   queries on `reach.installed`: a finding that ships needs a runtime-only route, one that does not ship
+   needs a dev-inclusive one, and asking for both in a single query computes a `shortestPath` that is
+   always thrown away.
+4. **Several small queries rather than one wide one.** The package page fans out to dependencies,
    dependents, maintainers, advisories and applications; asking for all of that in one query multiplies
    cardinality through the joins and turns one page load into a million rows.
 
-`npm run verify` prints per-query timings and flags anything over three seconds.
+Current measured shape, from `npm run verify` against the live free-tier instance:
+
+| | |
+|---|---|
+| Dashboard, advisory feed, all reports | **0.9 – 2.5 s** |
+| Blast radius, package detail, application detail | **3.8 – 4.1 s** |
+| Path tracing (`allShortestPaths`, the heaviest query here) | **5.9 s** |
+
+Every page streams its panels behind skeletons via `<Suspense>`, so the shell and navigation are
+interactive immediately and the slow panels fill in. `npm run verify` prints per-query timings and flags
+anything over three seconds.
+
+### Two things CognoDB does differently from Neo4j
+
+Both were found by running the full query set against a local Neo4j 5.26 first and then against CognoDB,
+and both are worth knowing if you are porting a Neo4j codebase:
+
+- **`shortestPath` returns *every* path of the shortest length**, behaving like `allShortestPaths`. On
+  Neo4j it returns one. Uncollapsed, an application with four equally short routes appeared four times and
+  the "services exposed" count read **72** for a graph containing 30 applications. Every `shortestPath`
+  here is wrapped in `collect(path)[0]`.
+- **Variable-length expansions do not appear to be pruned to distinct endpoints**, which is what makes the
+  closure necessary. Same query, same data, 136 ms on Neo4j versus 4.3 s here.
+
+A third difference is in the driver rather than the database: with `disableLosslessIntegers` enabled, JS
+numbers are sent as Bolt *floats*, and `SKIP`/`LIMIT` reject a float outright. Every paginated query fails
+until integer parameters are wrapped in `neo4j.int()`.
 
 ### This app's own dependencies
 

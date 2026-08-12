@@ -36,7 +36,7 @@ export async function listAdvisories(filter: AdvisoryFilter): Promise<AdvisoryLi
        AND ($search = '' OR toLower(adv.id) CONTAINS toLower($search)
                          OR toLower(pkg.name) CONTAINS toLower($search)
                          OR toLower(adv.summary) CONTAINS toLower($search))
-     OPTIONAL MATCH (app:Application)-[:DEPENDS_ON*1..5]->(pkg)
+     OPTIONAL MATCH (app:Application)-[:REACHES { installed: true }]->(pkg)
      WITH adv, affects, pkg, collect(DISTINCT app) AS apps
      WHERE NOT $exposedOnly OR size(apps) > 0
      RETURN
@@ -114,8 +114,18 @@ export type BlastRadius = {
  *      ticket. In SQL both traversals would be separate recursive CTEs over a
  *      scope-filtered edge table.
  *
- * `maxDepth` is a real parameter because the path is bound here and can be
- * measured with `length()`.
+ * The set of exposed applications comes from the materialised `REACHES` closure
+ * — that is the part that has to be fast, because it is also the number shown
+ * on the dashboard. The *route* is then traversed live, once per exposed
+ * application, with both endpoints already bound. So the expensive open-ended
+ * search is precomputed and the explanation stays real.
+ *
+ * `collect(path)[0]` is not decoration. On Neo4j `shortestPath` yields a single
+ * path; on CognoDB it yields every path of the shortest length, the same as
+ * `allShortestPaths`. Without collapsing them, an application with four equally
+ * short routes appears four times and the "services exposed" count reads 72 for
+ * a graph containing 30 applications. Any path of the minimum length is a valid
+ * illustration, so taking the first is correct as well as sufficient.
  */
 export async function getBlastRadius(advisoryId: string, maxDepth: number): Promise<BlastRadius | null> {
   const header = await runQuerySingle<{
@@ -138,36 +148,61 @@ export async function getBlastRadius(advisoryId: string, maxDepth: number): Prom
 
   if (!header) return null;
 
-  const rows = await runQuery<BlastRadiusRow>(
-    `MATCH (:Advisory { id: $advisoryId })-[:AFFECTS]->(vulnerable:Package)
-     MATCH (app:Application)
-     OPTIONAL MATCH installed = shortestPath((app)-[:DEPENDS_ON*1..5]->(vulnerable))
-     OPTIONAL MATCH declared = shortestPath((app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(vulnerable))
-     WITH app,
-          CASE WHEN installed IS NOT NULL AND length(installed) <= $maxDepth THEN installed END AS installed,
-          CASE WHEN declared IS NOT NULL AND length(declared) <= $maxDepth THEN declared END AS declared
-     WHERE installed IS NOT NULL OR declared IS NOT NULL
-     WITH app, installed, declared, coalesce(installed, declared) AS route
+  // Two queries, differing only in which edge types the route may use.
+  //
+  // An application whose route is fully installed has no use for a
+  // dev-inclusive route, and vice versa — so asking for both in one query
+  // computes a `shortestPath` that is always thrown away. Splitting on
+  // `reach.installed` (already known from the closure) halves the traversal
+  // work, and the declared-only half is usually a handful of rows.
+  const [installed, declaredOnly] = await Promise.all([
+    runQuery<BlastRadiusRow>(BLAST_RADIUS_INSTALLED, { advisoryId, maxDepth }),
+    runQuery<BlastRadiusRow>(BLAST_RADIUS_DECLARED_ONLY, { advisoryId, maxDepth }),
+  ]);
+
+  const rows = [...installed, ...declaredOnly].sort(
+    (a, b) =>
+      Number(a.declaredOnly) - Number(b.declaredOnly) ||
+      a.criticality.localeCompare(b.criticality) ||
+      (a.installedHops ?? a.declaredHops ?? 0) - (b.installedHops ?? b.declaredHops ?? 0) ||
+      a.applicationName.localeCompare(b.applicationName),
+  );
+
+  return { ...header, rows };
+}
+
+/** Shared tail of the two blast-radius queries. Constant text, no interpolated values. */
+const BLAST_RADIUS_PROJECTION = `
      RETURN
        app.id AS applicationId,
        app.name AS applicationName,
        app.team AS team,
        app.criticality AS criticality,
        app.environment AS environment,
-       CASE WHEN installed IS NULL THEN null ELSE length(installed) END AS installedHops,
-       CASE WHEN declared IS NULL THEN null ELSE length(declared) END AS declaredHops,
-       installed IS NULL AS declaredOnly,
+       CASE WHEN reach.installed THEN reach.hops ELSE null END AS installedHops,
+       reach.declaredHops AS declaredHops,
+       NOT reach.installed AS declaredOnly,
        [n IN nodes(route) | {
          kind: CASE WHEN n:Application THEN 'application' ELSE 'package' END,
          id: coalesce(n.id, n.name),
          label: n.name
-       }] AS route
-     ORDER BY declaredOnly ASC, app.criticality ASC, installedHops ASC, applicationName ASC`,
-    { advisoryId, maxDepth },
-  );
+       }] AS route`;
 
-  return { ...header, rows };
-}
+const BLAST_RADIUS_INSTALLED = `
+     MATCH (:Advisory { id: $advisoryId })-[:AFFECTS]->(vulnerable:Package)
+     MATCH (app:Application)-[reach:REACHES { installed: true }]->(vulnerable)
+     WHERE reach.hops <= $maxDepth
+     MATCH path = shortestPath((app)-[:DEPENDS_ON*1..5]->(vulnerable))
+     WITH app, reach, collect(path)[0] AS route
+     ${BLAST_RADIUS_PROJECTION}`;
+
+const BLAST_RADIUS_DECLARED_ONLY = `
+     MATCH (:Advisory { id: $advisoryId })-[:AFFECTS]->(vulnerable:Package)
+     MATCH (app:Application)-[reach:REACHES { installed: false }]->(vulnerable)
+     WHERE reach.hops <= $maxDepth
+     MATCH path = shortestPath((app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(vulnerable))
+     WITH app, reach, collect(path)[0] AS route
+     ${BLAST_RADIUS_PROJECTION}`;
 
 export type SeverityByWeakness = { cwe: string; total: number; exposed: number };
 
@@ -175,7 +210,7 @@ export type SeverityByWeakness = { cwe: string; total: number; exposed: number }
 export async function getWeaknessBreakdown(): Promise<SeverityByWeakness[]> {
   return runQuery<SeverityByWeakness>(
     `MATCH (adv:Advisory)-[:AFFECTS]->(pkg:Package)
-     OPTIONAL MATCH (app:Application)-[:DEPENDS_ON*1..5]->(pkg)
+     OPTIONAL MATCH (app:Application)-[:REACHES { installed: true }]->(pkg)
      WITH adv, count(DISTINCT app) AS exposedApps
      WITH adv.cwe AS cwe, collect(exposedApps > 0) AS exposures
      RETURN cwe, size(exposures) AS total, size([e IN exposures WHERE e]) AS exposed

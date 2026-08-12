@@ -228,6 +228,32 @@ async function main() {
     return `${rows.length} weakness classes`;
   });
 
+  // The materialised closure is derived data, and derived data drifts. This
+  // proves it hasn't: for a sample of packages, the number of applications
+  // recorded in REACHES must equal the number found by actually walking
+  // DEPENDS_ON. If a generator change ever lands without a reseed, or the
+  // closure is built to a different depth than the queries use, this fails.
+  await check("REACHES agrees with live traversal", async () => {
+    const { runQuery } = await import("../src/lib/neo4j");
+    const rows = await runQuery<{ name: string; materialised: number; traversed: number }>(
+      `MATCH (pkg:Package)<-[:AFFECTS]-(:Advisory)
+       WITH pkg LIMIT 12
+       OPTIONAL MATCH (a:Application)-[:REACHES { installed: true }]->(pkg)
+       WITH pkg, count(DISTINCT a) AS materialised
+       OPTIONAL MATCH (b:Application)-[:DEPENDS_ON*1..5]->(pkg)
+       RETURN pkg.name AS name, materialised, count(DISTINCT b) AS traversed`,
+    );
+
+    const drifted = rows.filter((row) => row.materialised !== row.traversed);
+    if (drifted.length > 0) {
+      const detail = drifted
+        .map((row) => `${row.name}: REACHES=${row.materialised} traversal=${row.traversed}`)
+        .join("; ");
+      throw new Error(`closure disagrees with traversal — ${detail}. Re-run npm run seed:reset.`);
+    }
+    return `${rows.length} packages cross-checked, all match`;
+  });
+
   await closeDriver();
 
   if (failures > 0) {

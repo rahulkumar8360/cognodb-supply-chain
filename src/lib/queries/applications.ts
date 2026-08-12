@@ -61,20 +61,16 @@ export async function getApplicationDetail(id: string): Promise<ApplicationDetai
 
   if (!app) return null;
 
-  const [counts, directDependencies, findings] = await Promise.all([
+  const [counts, directDependencies, installedFindings, declaredOnlyFindings] = await Promise.all([
     runQuerySingle<{ installedPackages: number; declaredOnlyPackages: number }>(
-      `MATCH (app:Application { id: $id })
-       OPTIONAL MATCH (app)-[:DEPENDS_ON*1..5]->(installed:Package)
-       WITH app, count(DISTINCT installed) AS installedCount
-       OPTIONAL MATCH (app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(declared:Package)
-       WITH installedCount, count(DISTINCT declared) AS declaredCount
-       RETURN installedCount AS installedPackages,
-              declaredCount - installedCount AS declaredOnlyPackages`,
+      `MATCH (:Application { id: $id })-[r:REACHES]->(pkg:Package)
+       RETURN count(CASE WHEN r.installed THEN pkg END) AS installedPackages,
+              count(CASE WHEN NOT r.installed THEN pkg END) AS declaredOnlyPackages`,
       { id },
     ),
     runQuery<ApplicationDirectDependency>(
       `MATCH (:Application { id: $id })-[dep:DEPENDS_ON|DEPENDS_ON_DEV]->(pkg:Package)
-       OPTIONAL MATCH (pkg)-[:DEPENDS_ON*1..5]->(behind:Package)
+       OPTIONAL MATCH (pkg)-[:DEPENDS_ON*1..3]->(behind:Package)
        WITH pkg, dep, count(DISTINCT behind) AS transitivePackages
        OPTIONAL MATCH (pkg)<-[:AFFECTS]-(adv:Advisory)
        RETURN pkg.name AS name, pkg.version AS version, dep.versionRange AS versionRange,
@@ -83,31 +79,21 @@ export async function getApplicationDetail(id: string): Promise<ApplicationDetai
        ORDER BY advisories DESC, transitivePackages DESC, pkg.name ASC`,
       { id },
     ),
-    runQuery<ApplicationFinding>(
-      `MATCH (app:Application { id: $id })
-       MATCH (app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(pkg:Package)<-[affects:AFFECTS]-(adv:Advisory)
-       WITH DISTINCT app, pkg, affects, adv
-       OPTIONAL MATCH installed = shortestPath((app)-[:DEPENDS_ON*1..5]->(pkg))
-       MATCH declared = shortestPath((app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(pkg))
-       WITH pkg, affects, adv, coalesce(installed, declared) AS route, installed IS NULL AS declaredOnly
-       RETURN
-         adv.id AS id, adv.severity AS severity, adv.cvss AS cvss, adv.cwe AS cwe,
-         adv.summary AS summary, adv.publishedAt AS publishedAt, adv.simulated AS simulated,
-         pkg.name AS packageName, pkg.version AS packageVersion,
-         affects.patchedIn AS patchedIn,
-         length(route) AS hops,
-         declaredOnly,
-         [n IN nodes(route) | {
-           kind: CASE WHEN n:Application THEN 'application' ELSE 'package' END,
-           id: coalesce(n.id, n.name),
-           label: n.name
-         }] AS route
-       ORDER BY declaredOnly ASC,
-         CASE adv.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'moderate' THEN 2 ELSE 3 END ASC,
-         hops ASC, adv.cvss DESC`,
-      { id },
-    ),
+    // Split on installed vs declared-only for the same reason as the blast
+    // radius: a finding that ships has no use for a dev-inclusive route, so
+    // asking for both in one query computes a shortestPath that is discarded.
+    runQuery<ApplicationFinding>(FINDINGS_INSTALLED, { id }),
+    runQuery<ApplicationFinding>(FINDINGS_DECLARED_ONLY, { id }),
   ]);
+
+  const severityRank: Record<string, number> = { critical: 0, high: 1, moderate: 2, low: 3 };
+  const findings = [...installedFindings, ...declaredOnlyFindings].sort(
+    (a, b) =>
+      Number(a.declaredOnly) - Number(b.declaredOnly) ||
+      severityRank[a.severity] - severityRank[b.severity] ||
+      a.hops - b.hops ||
+      b.cvss - a.cvss,
+  );
 
   return {
     ...app,
@@ -117,6 +103,35 @@ export async function getApplicationDetail(id: string): Promise<ApplicationDetai
     findings,
   };
 }
+
+/** Shared tail of the two findings queries. Constant text, no interpolated values. */
+const FINDINGS_PROJECTION = `
+       RETURN
+         adv.id AS id, adv.severity AS severity, adv.cvss AS cvss, adv.cwe AS cwe,
+         adv.summary AS summary, adv.publishedAt AS publishedAt, adv.simulated AS simulated,
+         pkg.name AS packageName, pkg.version AS packageVersion,
+         affects.patchedIn AS patchedIn,
+         reach.hops AS hops,
+         NOT reach.installed AS declaredOnly,
+         [n IN nodes(route) | {
+           kind: CASE WHEN n:Application THEN 'application' ELSE 'package' END,
+           id: coalesce(n.id, n.name),
+           label: n.name
+         }] AS route`;
+
+const FINDINGS_INSTALLED = `
+       MATCH (app:Application { id: $id })-[reach:REACHES { installed: true }]->(pkg:Package)
+             <-[affects:AFFECTS]-(adv:Advisory)
+       MATCH path = shortestPath((app)-[:DEPENDS_ON*1..5]->(pkg))
+       WITH pkg, affects, adv, reach, collect(path)[0] AS route
+       ${FINDINGS_PROJECTION}`;
+
+const FINDINGS_DECLARED_ONLY = `
+       MATCH (app:Application { id: $id })-[reach:REACHES { installed: false }]->(pkg:Package)
+             <-[affects:AFFECTS]-(adv:Advisory)
+       MATCH path = shortestPath((app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(pkg))
+       WITH pkg, affects, adv, reach, collect(path)[0] AS route
+       ${FINDINGS_PROJECTION}`;
 
 export type TeamExposure = {
   team: string;

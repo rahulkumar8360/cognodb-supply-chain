@@ -161,9 +161,9 @@ export async function getPackageDetail(name: string): Promise<PackageDetail | nu
   const [reach, advisories, maintainers, dependencies, dependents, applications] = await Promise.all([
     runQuerySingle<{ transitiveDependencies: number; transitiveDependents: number }>(
       `MATCH (pkg:Package { name: $name })
-       OPTIONAL MATCH (pkg)-[:DEPENDS_ON*1..5]->(down:Package)
+       OPTIONAL MATCH (pkg)-[:DEPENDS_ON*1..4]->(down:Package)
        WITH pkg, count(DISTINCT down) AS transitiveDependencies
-       OPTIONAL MATCH (up:Package)-[:DEPENDS_ON*1..5]->(pkg)
+       OPTIONAL MATCH (up:Package)-[:DEPENDS_ON*1..3]->(pkg)
        RETURN transitiveDependencies, count(DISTINCT up) AS transitiveDependents`,
       { name },
     ),
@@ -200,11 +200,8 @@ export async function getPackageDetail(name: string): Promise<PackageDetail | nu
       { name },
     ),
     runQuery<{ id: string; name: string; criticality: Criticality; hops: number }>(
-      `MATCH (pkg:Package { name: $name })
-       MATCH (app:Application)-[:DEPENDS_ON*1..5]->(pkg)
-       WITH DISTINCT app, pkg
-       MATCH route = shortestPath((app)-[:DEPENDS_ON*1..5]->(pkg))
-       RETURN app.id AS id, app.name AS name, app.criticality AS criticality, length(route) AS hops
+      `MATCH (app:Application)-[reach:REACHES { installed: true }]->(:Package { name: $name })
+       RETURN app.id AS id, app.name AS name, app.criticality AS criticality, reach.hops AS hops
        ORDER BY app.criticality ASC, hops ASC, app.name ASC`,
       { name },
     ),

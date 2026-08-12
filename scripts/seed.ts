@@ -48,6 +48,7 @@ const SCHEMA_STATEMENTS: Array<{ label: string; cypher: string }> = [
   { label: "Package.weeklyDownloads index", cypher: "CREATE INDEX package_downloads IF NOT EXISTS FOR (p:Package) ON (p.weeklyDownloads)" },
   { label: "Advisory.severity index", cypher: "CREATE INDEX advisory_severity IF NOT EXISTS FOR (a:Advisory) ON (a.severity)" },
   { label: "License.category index", cypher: "CREATE INDEX license_category IF NOT EXISTS FOR (l:License) ON (l.category)" },
+  { label: "REACHES.installed index", cypher: "CREATE INDEX reaches_installed IF NOT EXISTS FOR ()-[r:REACHES]-() ON (r.installed)" },
 ];
 
 async function applySchema(driver: Driver, database: string) {
@@ -301,6 +302,17 @@ async function main() {
      MATCH (p:Package { name: row.packageName })
      MERGE (m)-[r:MAINTAINS]->(p)
      SET r.since = row.since, r.role = row.role`,
+  );
+  await loadInBatches(
+    driver,
+    database,
+    "REACHES (derived closure)",
+    dataset.reaches,
+    `UNWIND $rows AS row
+     MATCH (app:Application { id: row.applicationId })
+     MATCH (pkg:Package { name: row.packageName })
+     MERGE (app)-[r:REACHES]->(pkg)
+     SET r.installed = row.installed, r.hops = row.hops, r.declaredHops = row.declaredHops`,
   );
   await loadInBatches(
     driver,

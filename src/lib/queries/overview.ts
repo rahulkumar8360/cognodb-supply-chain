@@ -3,18 +3,29 @@ import { runQuery, runQuerySingle } from "../neo4j";
 import type { Criticality, Severity, SeverityCounts } from "./types";
 
 /**
- * A note on traversal depth.
+ * Two notes that apply to every query in this directory.
  *
- * Cypher does not allow the bounds of a variable-length pattern to come from a
- * parameter — `-[:DEPENDS_ON*1..$depth]->` is a syntax error, because the
- * bounds are part of the plan, not the input. Building the number into the
- * string would mean concatenating Cypher, which this codebase does not do.
+ * **Traversal depth is a constant, not a parameter.** Cypher does not allow the
+ * bounds of a variable-length pattern to come from a parameter —
+ * `-[:DEPENDS_ON*1..$depth]->` is a syntax error, because the bounds are part
+ * of the plan rather than the input. Building the number into the string would
+ * mean concatenating Cypher, which this codebase does not do. So the bound is a
+ * constant of the application: five hops, which covers 99%+ of
+ * application-to-package routes in the seeded graph. Where the UI offers a
+ * depth control the query binds the path and filters on `length(path)`, which
+ * *is* a genuine parameter.
  *
- * So the bound is a constant of the application: five hops. Measured against
- * the seeded graph, 99.7% of application-to-package routes are five hops or
- * fewer, and the deepest is seven. Where the UI offers a depth control, the
- * query binds the path and filters on `length(path) <= $maxDepth`, which is a
- * genuine parameter.
+ * **Aggregates read `REACHES`; explanations traverse.** `REACHES` is a
+ * materialised transitive closure, rebuilt by the loader from the dependency
+ * edges (see `scripts/dataset.ts`). Counting "how many services can reach this
+ * package" from it is a one-hop query; doing it by expanding
+ * `(app)-[:DEPENDS_ON*1..5]->(pkg)` costs ~4.3 s per walk on a free-tier
+ * CognoDB instance, and the dashboard needs three. Anything that shows a
+ * *route* — blast radius, path tracing, the neighbourhood graph — still walks
+ * the dependency edges live, because a route cannot be precomputed into a
+ * single edge and those queries are scoped to one package anyway.
+ *
+ * The two must agree, and `npm run verify` checks that they do.
  */
 export const MAX_TRAVERSAL_DEPTH = 5;
 
@@ -56,7 +67,7 @@ export type ExposureSummary = SeverityCounts & {
 export async function getExposureSummary(): Promise<ExposureSummary> {
   const row = await runQuerySingle<ExposureSummary>(
     `MATCH (adv:Advisory)-[:AFFECTS]->(pkg:Package)
-     OPTIONAL MATCH (app:Application)-[:DEPENDS_ON*1..5]->(pkg)
+     OPTIONAL MATCH (app:Application)-[r:REACHES { installed: true }]->(pkg)
      WITH adv, count(DISTINCT app) AS exposedApps
      WITH collect({ severity: adv.severity, exposed: exposedApps > 0 }) AS rows
      RETURN
@@ -95,13 +106,12 @@ export type ApplicationExposure = {
 export async function getApplicationExposure(): Promise<ApplicationExposure[]> {
   return runQuery<ApplicationExposure>(
     `MATCH (app:Application)
-     OPTIONAL MATCH (app)-[:DEPENDS_ON*1..5]->(installed:Package)
-     OPTIONAL MATCH (installed)<-[:AFFECTS]-(adv:Advisory)
+     OPTIONAL MATCH (app)-[r:REACHES]->(pkg:Package)
+     OPTIONAL MATCH (pkg)<-[:AFFECTS]-(adv:Advisory)
      WITH app,
-          count(DISTINCT installed) AS installedCount,
-          collect(DISTINCT adv) AS advisories
-     OPTIONAL MATCH (app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(declared:Package)
-     WITH app, installedCount, advisories, count(DISTINCT declared) AS declaredCount
+          count(DISTINCT CASE WHEN r.installed THEN pkg END) AS installedCount,
+          count(DISTINCT pkg) AS declaredCount,
+          collect(DISTINCT CASE WHEN r.installed THEN adv END) AS advisories
      RETURN
        app.id AS id,
        app.name AS name,
@@ -139,7 +149,7 @@ export async function getRiskiestPackages(limit: number): Promise<RiskyPackage[]
   return runQuery<RiskyPackage>(
     `MATCH (adv:Advisory)-[:AFFECTS]->(pkg:Package)
      WITH pkg, collect(adv) AS advisories
-     MATCH (app:Application)-[:DEPENDS_ON*1..5]->(pkg)
+     MATCH (app:Application)-[:REACHES { installed: true }]->(pkg)
      WITH pkg, advisories, collect(DISTINCT app) AS apps
      MATCH (m:Maintainer)-[:MAINTAINS]->(pkg)
      WITH pkg, advisories, apps, count(DISTINCT m) AS maintainerCount

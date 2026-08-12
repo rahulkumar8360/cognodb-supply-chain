@@ -35,17 +35,15 @@ export type Chokepoint = {
  */
 export async function getChokepoints(minApplications: number, limit: number): Promise<Chokepoint[]> {
   return runQuery<Chokepoint>(
-    `MATCH (app:Application)-[:DEPENDS_ON*1..5]->(pkg:Package)
-     WITH pkg, collect(DISTINCT app) AS apps
+    `MATCH (app:Application)-[reach:REACHES { installed: true }]->(pkg:Package)
+     WITH pkg, collect(DISTINCT app) AS apps, min(reach.hops) AS shortestHops
      WHERE size(apps) >= $minApplications
      MATCH (pkg)<-[:MAINTAINS]-(m:Maintainer)
-     WITH pkg, apps, collect(m) AS maintainers
+     WITH pkg, apps, shortestHops, collect(m) AS maintainers
      WHERE size(maintainers) = 1
-     WITH pkg, apps, maintainers[0] AS solo
+     WITH pkg, apps, shortestHops, maintainers[0] AS solo
      MATCH (solo)-[:MAINTAINS]->(other:Package)
-     WITH pkg, apps, solo, count(DISTINCT other) AS alsoMaintains
-     MATCH route = shortestPath((:Application)-[:DEPENDS_ON*1..5]->(pkg))
-     WITH pkg, apps, solo, alsoMaintains, min(length(route)) AS shortestHops
+     WITH pkg, apps, shortestHops, solo, count(DISTINCT other) AS alsoMaintains
      RETURN
        pkg.name AS packageName,
        pkg.version AS version,
@@ -90,7 +88,7 @@ export type TakeoverRisk = {
  */
 export async function getTakeoverRisk(options: { requireNo2FA: boolean; limit: number }): Promise<TakeoverRisk[]> {
   return runQuery<TakeoverRisk>(
-    `MATCH (app:Application)-[:DEPENDS_ON*1..5]->(pkg:Package)
+    `MATCH (app:Application)-[:REACHES { installed: true }]->(pkg:Package)
      WITH pkg, collect(DISTINCT app) AS apps
      MATCH (m:Maintainer)-[:MAINTAINS]->(pkg)
      WHERE NOT $requireNo2FA OR m.twoFactorEnabled = false
@@ -148,12 +146,16 @@ export async function getLicenseExposure(categories: LicenseCategory[], limit: n
   return runQuery<LicenseExposure>(
     `MATCH (pkg:Package)-[:LICENSED_UNDER]->(lic:License)
      WHERE lic.category IN $categories
-     MATCH (app:Application)-[:DEPENDS_ON*1..5]->(pkg)
-     WITH lic, pkg, collect(DISTINCT app) AS apps
-     MATCH route = shortestPath((source:Application)-[:DEPENDS_ON*1..5]->(pkg))
-     WITH lic, pkg, apps, route
+     MATCH (app:Application)-[reach:REACHES { installed: true }]->(pkg)
+     WITH lic, pkg, collect(DISTINCT app) AS apps, min(reach.hops) AS shortestHops
+     WITH lic, pkg, apps, shortestHops
+     ORDER BY size(apps) DESC
+     LIMIT $limit
+     MATCH (source:Application)-[:REACHES { installed: true }]->(pkg)
+     MATCH route = shortestPath((source)-[:DEPENDS_ON*1..5]->(pkg))
+     WITH lic, pkg, apps, shortestHops, route
      ORDER BY length(route) ASC
-     WITH lic, pkg, apps, collect(route)[0] AS shortestRoute
+     WITH lic, pkg, apps, shortestHops, collect(route)[0] AS shortestRoute
      RETURN
        lic.id AS licenseId,
        lic.name AS licenseName,
@@ -162,10 +164,9 @@ export async function getLicenseExposure(categories: LicenseCategory[], limit: n
        pkg.version AS packageVersion,
        size(apps) AS applicationsReached,
        size([a IN apps WHERE a.criticality = 'tier-1']) AS tierOneReached,
-       length(shortestRoute) AS shortestHops,
+       shortestHops,
        [n IN nodes(shortestRoute) | n.name] AS exampleRoute
-     ORDER BY tierOneReached DESC, applicationsReached DESC, pkg.name ASC
-     LIMIT $limit`,
+     ORDER BY tierOneReached DESC, applicationsReached DESC, pkg.name ASC`,
     { categories, limit },
   );
 }
@@ -197,21 +198,16 @@ export type PhantomDependency = {
  */
 export async function getPhantomDependencies(limit: number): Promise<PhantomDependency[]> {
   return runQuery<PhantomDependency>(
-    `MATCH (app:Application)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(pkg:Package)
-     WITH DISTINCT app, pkg
+    `MATCH (app:Application)-[reach:REACHES { installed: false }]->(pkg:Package)
      MATCH (pkg)<-[:AFFECTS]-(adv:Advisory)
-     WITH app, pkg, collect(adv) AS advisories
-     OPTIONAL MATCH installed = shortestPath((app)-[:DEPENDS_ON*1..5]->(pkg))
-     WITH app, pkg, advisories, installed
-     WHERE installed IS NULL
-     MATCH declared = shortestPath((app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(pkg))
+     WITH app, pkg, reach, collect(adv) AS advisories
      RETURN
        app.id AS applicationId,
        app.name AS applicationName,
        app.criticality AS criticality,
        pkg.name AS packageName,
        pkg.version AS packageVersion,
-       length(declared) AS declaredHops,
+       reach.declaredHops AS declaredHops,
        size(advisories) AS advisories,
        CASE
          WHEN any(a IN advisories WHERE a.severity = 'critical') THEN 'critical'

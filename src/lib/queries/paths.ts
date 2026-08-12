@@ -52,7 +52,7 @@ export async function findRoutes(
   const routes = await runQuery<DependencyRoute>(
     `MATCH (app:Application { id: $applicationId })
      MATCH (pkg:Package { name: $packageName })
-     MATCH route = allShortestPaths((app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..6]->(pkg))
+     MATCH route = allShortestPaths((app)-[:DEPENDS_ON|DEPENDS_ON_OPTIONAL|DEPENDS_ON_DEV*1..5]->(pkg))
      WITH route, [r IN relationships(route) | type(r)] AS edgeTypes
      RETURN
        length(route) AS hops,

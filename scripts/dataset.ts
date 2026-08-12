@@ -88,6 +88,36 @@ export type ApplicationDependency = {
   versionRange: string;
 };
 
+/**
+ * A materialised transitive closure: this application can reach this package.
+ *
+ * The dependency edges are the source of truth and every route shown in the UI
+ * is still traversed live. This is a derived index on top of them, rebuilt from
+ * scratch by the loader.
+ *
+ * It exists because CognoDB's planner does not appear to prune variable-length
+ * expansions the way Neo4j's does. Measured on the free (c0) tier, one
+ * `(app)-[:DEPENDS_ON*1..5]->(pkg)` walk from all thirty applications costs
+ * ~4.3 seconds, and the dashboard needs three of them — a fourteen-second page.
+ * Against this same graph in Neo4j the identical query is 136 ms, so the cost
+ * is the engine's expansion strategy rather than the model or the data volume.
+ *
+ * Reachability changes only when someone merges a dependency change, so it is
+ * exactly the kind of thing worth precomputing. The queries that *explain* a
+ * result — blast-radius routes, path tracing, the neighbourhood graph — stay
+ * live, because those are scoped to a single package and are fast.
+ */
+export type Reaches = {
+  applicationId: string;
+  packageName: string;
+  /** True when a path exists using runtime dependencies only, i.e. it really ships. */
+  installed: boolean;
+  /** Shortest hop count over the edges that apply: runtime-only when installed, otherwise any. */
+  hops: number;
+  /** Shortest hop count following optional and dev edges too. */
+  declaredHops: number;
+};
+
 export type Maintains = { username: string; packageName: string; since: string; role: "owner" | "collaborator" };
 export type Affects = { advisoryId: string; packageName: string; vulnerableRange: string; patchedIn: string };
 export type LicensedUnder = { packageName: string; licenseId: string };
@@ -103,7 +133,11 @@ export type Dataset = {
   maintains: Maintains[];
   affects: Affects[];
   licensedUnder: LicensedUnder[];
+  reaches: Reaches[];
 };
+
+/** Traversal depth the closure is built to. Must match the bound used in the live queries. */
+export const REACH_DEPTH = 5;
 
 // --------------------------------------------------------------- utilities --
 
@@ -859,7 +893,91 @@ export function buildDataset(): Dataset {
     maintains,
     affects,
     licensedUnder,
+    reaches: computeReachability(applications, applicationDependencies, packageDependencies),
   };
+}
+
+/**
+ * Builds the `REACHES` closure with two breadth-first walks per application:
+ * one over runtime edges only, one over every declared edge.
+ *
+ * Breadth-first order means the first time a package is seen is by definition
+ * its shortest route, so hop counts fall out of the walk rather than needing a
+ * second pass.
+ *
+ * This runs in the loader rather than as Cypher because a full closure computed
+ * in-database on a burstable 0.5 vCPU instance is exactly the slow traversal it
+ * exists to avoid. The result is verifiable against the live queries: the
+ * blast-radius page traverses the dependency edges directly and must agree with
+ * the count the dashboard reads from here.
+ */
+function computeReachability(
+  applications: ApplicationNode[],
+  applicationDependencies: ApplicationDependency[],
+  packageDependencies: PackageDependency[],
+): Reaches[] {
+  const runtimeOut = new Map<string, string[]>();
+  const declaredOut = new Map<string, string[]>();
+  const push = (map: Map<string, string[]>, from: string, to: string) => {
+    const list = map.get(from);
+    if (list) list.push(to);
+    else map.set(from, [to]);
+  };
+
+  for (const edge of packageDependencies) {
+    push(declaredOut, edge.from, edge.to);
+    if (edge.scope === "runtime") push(runtimeOut, edge.from, edge.to);
+  }
+
+  const appRuntimeEntry = new Map<string, string[]>();
+  const appDeclaredEntry = new Map<string, string[]>();
+  for (const edge of applicationDependencies) {
+    push(appDeclaredEntry, edge.from, edge.to);
+    if (edge.scope === "runtime") push(appRuntimeEntry, edge.from, edge.to);
+  }
+
+  function walk(entry: string[], out: Map<string, string[]>): Map<string, number> {
+    const distance = new Map<string, number>();
+    let frontier: string[] = [];
+    for (const name of entry) {
+      if (!distance.has(name)) {
+        distance.set(name, 1);
+        frontier.push(name);
+      }
+    }
+    for (let depth = 2; depth <= REACH_DEPTH && frontier.length > 0; depth += 1) {
+      const next: string[] = [];
+      for (const current of frontier) {
+        for (const neighbour of out.get(current) ?? []) {
+          if (!distance.has(neighbour)) {
+            distance.set(neighbour, depth);
+            next.push(neighbour);
+          }
+        }
+      }
+      frontier = next;
+    }
+    return distance;
+  }
+
+  const rows: Reaches[] = [];
+  for (const application of applications) {
+    const installed = walk(appRuntimeEntry.get(application.id) ?? [], runtimeOut);
+    const declared = walk(appDeclaredEntry.get(application.id) ?? [], declaredOut);
+
+    for (const [packageName, declaredHops] of declared) {
+      const installedHops = installed.get(packageName);
+      rows.push({
+        applicationId: application.id,
+        packageName,
+        installed: installedHops !== undefined,
+        hops: installedHops ?? declaredHops,
+        declaredHops,
+      });
+    }
+  }
+
+  return rows;
 }
 
 /** Row counts, printed by the seed script and quoted in the README. */
@@ -878,6 +996,7 @@ export function summarize(dataset: Dataset) {
       MAINTAINS: dataset.maintains.length,
       AFFECTS: dataset.affects.length,
       LICENSED_UNDER: dataset.licensedUnder.length,
+      "REACHES (derived)": dataset.reaches.length,
     },
   };
 }
