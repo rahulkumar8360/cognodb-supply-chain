@@ -473,7 +473,43 @@ lifetime.
 
 ## Screenshots
 
-_(added after deployment)_
+### Overview — what can reach production today
+
+Of 169 advisories in the feed, 153 can be reached from something Meridian runs. The rest are real
+vulnerabilities in packages nobody installs, and the point of the page is to not show them to you.
+
+![Overview dashboard](docs/01-overview.png)
+
+### Blast radius — the query this exists for
+
+One real advisory, `CVE-2021-44906` against `minimist`. Thirty services exposed, twelve of them tier-1,
+and **three** of those have it as a direct dependency they can fix themselves. Every row carries the route
+that gets there: `Config Service → json5 → minimist`.
+
+![Blast radius of CVE-2021-44906](docs/02-blast-radius.png)
+
+### Maintainer risk — who can push code into production
+
+`content-type` is downloaded 53 million times a week, sits under all thirty services, and exactly one
+account can publish a new version of it — an account with no two-factor authentication that also controls
+twenty-one other packages. This is a two-hop question with an aggregation on the far side of it.
+
+![Single-maintainer chokepoints](docs/03-maintainer-risk.png)
+
+### Package neighbourhood
+
+Two hops out from `express` in each direction. Dependents settle left, dependencies right, so the picture
+reads the way the sentence does. Node colour is advisory severity; size is download volume.
+
+![Dependency neighbourhood of express](docs/04-package-graph.png)
+
+### Path tracing — why is this package in my build?
+
+`allShortestPaths` returns *every* shortest route, not one. Checkout API reaches `ms` six different ways:
+four fully installed, two only through a dev dependency. Removing `express` would not remove `ms` — which
+is exactly the thing a single-route answer would have hidden.
+
+![Tracing every route from Checkout API to ms](docs/05-trace.png)
 
 ---
 
