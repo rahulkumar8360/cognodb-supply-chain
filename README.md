@@ -6,6 +6,7 @@ A working web application that answers open-source supply-chain questions as gra
 [CognoDB](https://console.cognodb.com). Built for the Wexa AI take-home assignment.
 
 - **Live demo:** **https://cognodb-supply-chain.vercel.app**
+- **Walkthrough:** **[2-minute video](https://drive.google.com/file/d/1Q0UHG81_2GhXmxQh48XzlF8rXGCuDp9V/view?usp=sharing)**
 - **Stack:** Next.js 15 (App Router) · TypeScript · Tailwind CSS v4 · `neo4j-driver` over Bolt · CognoDB
 
 ---
